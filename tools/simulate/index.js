@@ -43,6 +43,8 @@ Dex.includeModData();
 
 const { ExhaustiveRunner } = require('../../sim/tools/exhaustive-runner');
 const { MultiRandomRunner } = require('../../sim/tools/multi-random-runner');
+const { BattleStream } = require('../../sim/battle-stream');
+const { NativeBattleStream } = require('../../sim/native-battle-stream');
 
 // Tracks whether some promises threw errors that weren't caught so we can log
 // and exit with a non-zero status to fail any tests. This "shouldn't happen"
@@ -99,6 +101,62 @@ function parseFlags(argv) {
 	return require('minimist')(argv.slice(2));
 }
 
+function normalizeList(value) {
+	if (value === undefined || value === null) return undefined;
+	const items = Array.isArray(value) ? value : [value];
+	const tokens = [];
+	for (const item of items) {
+		const text = String(item).trim();
+		if (!text) continue;
+		for (const part of text.split(',').map(token => token.trim())) {
+			if (part) tokens.push(part);
+		}
+	}
+	return tokens.length ? tokens : undefined;
+}
+
+function parseEnvList(value) {
+	const entries = normalizeList(value);
+	if (!entries) return undefined;
+	const env = {};
+	for (const entry of entries) {
+		const [key, ...rest] = entry.split('=');
+		if (!key) continue;
+		env[key] = rest.join('=');
+	}
+	return Object.keys(env).length ? env : undefined;
+}
+
+function toDualOptions(argv) {
+	const nativeCommand = argv.native || argv['native-command'];
+	let dualFlag = argv.dual;
+	if (Array.isArray(dualFlag)) dualFlag = dualFlag.pop();
+	if (dualFlag === 'false') dualFlag = false;
+	if (dualFlag === 'true') dualFlag = true;
+	if (dualFlag === undefined && !nativeCommand) return undefined;
+	if (dualFlag === false) return false;
+	const options = {};
+	if (dualFlag === 'debug' || argv['dual-debug']) options.debug = true;
+	if (nativeCommand) {
+		const args = normalizeList(argv['native-args']);
+		const terminator = argv['native-terminator'];
+		const cwd = argv['native-cwd'];
+		const env = parseEnvList(argv['native-env']);
+		const disableFallback = argv['no-native-fallback'] || argv['native-fallback'] === false;
+		options.testStreamFactory = () => new NativeBattleStream({
+			process: {
+				command: nativeCommand,
+				args,
+				cwd,
+				env,
+			},
+			terminator,
+			fallbackFactory: disableFallback ? undefined : () => new BattleStream(),
+		});
+	}
+	return options;
+}
+
 if (!process.argv[2] || /^[0-9]+$/.test(process.argv[2])) process.argv.splice(2, 0, 'multi');
 switch (process.argv[2]) {
 case 'multi':
@@ -108,6 +166,8 @@ case 'random':
 		const options = { totalGames: 100, ...argv };
 		options.totalGames = Number(argv._[1] || argv.num) || options.totalGames;
 		if (argv.seed) options.prng = argv.seed.split(',').map(s => Number(s));
+		const dualOptions = toDualOptions(argv);
+		if (dualOptions !== undefined) options.dual = dualOptions;
 		// Run options.totalGames, exiting with the number of games with errors.
 		(async () => process.exit(await new MultiRandomRunner(options).run()))();
 	}
@@ -132,13 +192,14 @@ case 'exhaustive':
 		const maxFailures = argv.maxFailures || argv.failures || (formats.length > 1 ? ExhaustiveRunner.MAX_FAILURES : 1);
 		const prng = argv.seed && argv.seed.split(',').map(s => Number(s));
 		const maxGames = argv.maxGames || argv.games;
+		const dualOptions = toDualOptions(argv);
 		(async () => {
 			let failures = 0;
 			do {
 				for (const format of formats) {
-					failures += await new ExhaustiveRunner({
-						format, cycles, prng, maxFailures, log: true, dual: argv.dual, maxGames,
-					}).run();
+					const runnerOptions = { format, cycles, prng, maxFailures, log: true, maxGames };
+					if (dualOptions !== undefined) runnerOptions.dual = dualOptions;
+					failures += await new ExhaustiveRunner(runnerOptions).run();
 					process.stdout.write('\n');
 					if (failures >= maxFailures) break;
 				}

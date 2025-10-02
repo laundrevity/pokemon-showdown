@@ -21,6 +21,25 @@ battles played, which formats are used, how they are run, and what to output.
     it runs.
 -   **`--input`**: dump the battle _input_ logs of each battle it runs.
 -   **`--error`**: dump the battle _input_ logs of each battle which errors.
+-   **`--dual`**: enable the dual-runner so every battle is mirrored against a
+    second simulator. Accepts `true` (default behaviour) or `debug` (keep state
+    dumps on mismatch). Passing `false` disables dual mode even if a native
+    command is provided.
+-   **`--dual-debug`**: shortcut for enabling debug mode alongside other dual
+    options.
+-   **`--native`** / **`--native-command`**: path to a native Showdown
+    implementation. When provided, the harness will stream the standard battle
+    protocol to the executable and compare its responses to the JavaScript
+    engine.
+-   **`--native-args`**: comma-separated arguments forwarded to the native
+    executable.
+-   **`--native-cwd`**: working directory for the native process.
+-   **`--native-env`**: comma-separated `KEY=VALUE` pairs added to the native
+    process environment.
+-   **`--native-terminator`**: override the message terminator used when
+    reading from the native process (defaults to a blank line).
+-   **`--no-native-fallback`**: disable the automatic fallback to the
+    JavaScript engine when the native executable cannot be launched.
 
 ### Format
 
