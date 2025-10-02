@@ -12,6 +12,7 @@
 
 export { Battle } from './battle';
 export { BattleStream, getPlayerStreams } from './battle-stream';
+export { NativeBattleStream } from './native-battle-stream';
 export { Pokemon } from './pokemon';
 export { PRNG } from './prng';
 export { Side } from './side';

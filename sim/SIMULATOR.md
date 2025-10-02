@@ -163,3 +163,35 @@ Note that choice requests (updates telling the player what choices they have for
 
 Sent at the end of a battle. `LOGDATA` is a JSON object that has various information you might find useful but are too lazy to extract from the update messages, such as turn count and winner name.
 
+
+Dual streams and native simulators
+----------------------------------
+
+The simulator tooling ships with a **dual runner** that feeds identical inputs into two `BattleStream` instances and checks that they stay in sync. This is useful for regression testing and for comparing native reimplementations of the engine.
+
+```js
+const { Runner, NativeBattleStream, BattleStream } = require('pokemon-showdown');
+
+const runner = new Runner({
+	format: 'gen1customgame',
+	dual: {
+		debug: false,
+		testStreamFactory: () => new NativeBattleStream({
+			process: {
+				command: './build/gen1_ou_sim',
+				args: ['--seed', '1234'],
+			},
+			// Optional safety net while the native executable is under construction
+			fallbackFactory: () => new BattleStream(),
+		}),
+	},
+});
+
+await runner.run();
+```
+
+- `NativeBattleStream` proxies the Showdown simulator protocol over `stdin`/`stdout`. Each outbound message is terminated by a blank line (`"\n\n"`), which is the default format expected by the JavaScript engine as well.
+- Provide a `fallbackFactory` if you want the test to transparently revert to the built-in JS simulator (for example during early bring-up when the native binary might be missing).
+- Custom comparators can be injected through `dual.comparator` when the native implementation emits additional diagnostic data. When omitted, only the protocol log is enforced (state comparisons are skipped if the test stream doesn't expose a JavaScript `Battle`).
+
+For large-scale validation (e.g. self-play stress tests in Gen 1 OU), wire the same `dual` configuration into `MultiRandomRunner` or `ExhaustiveRunner` and reuse the existing `tools/simulate` scripts to drive thousands of battles in dual mode.

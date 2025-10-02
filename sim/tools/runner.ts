@@ -12,9 +12,24 @@ import { Dex } from '..';
 import { type ObjectReadWriteStream } from '../../lib/streams';
 import { Battle } from '../battle';
 import * as BattleStreams from '../battle-stream';
+import type { BattleStream } from '../battle-stream';
 import { State } from '../state';
 import { PRNG, type PRNGSeed } from '../prng';
 import { RandomPlayerAI } from './random-player-ai';
+
+export interface DualStreamComparatorContext {
+	control: RawBattleStream;
+	test: BattleStream;
+	end?: boolean;
+}
+
+export type DualStreamComparator = (context: DualStreamComparatorContext) => void;
+
+export interface DualStreamOptions {
+	debug?: boolean;
+	comparator?: DualStreamComparator;
+	testStreamFactory?: () => BattleStream;
+}
 
 export interface AIOptions {
 	createAI: (stream: ObjectReadWriteStream<string>, options: AIOptions) => RandomPlayerAI;
@@ -34,7 +49,7 @@ export interface RunnerOptions {
 	input?: boolean;
 	output?: boolean;
 	error?: boolean;
-	dual?: boolean | 'debug';
+	dual?: boolean | 'debug' | DualStreamOptions;
 }
 
 export class Runner {
@@ -53,7 +68,7 @@ export class Runner {
 	private readonly input: boolean;
 	private readonly output: boolean;
 	private readonly error: boolean;
-	private readonly dual: boolean | 'debug';
+	private readonly dualOptions: DualStreamOptions | null;
 
 	constructor(options: RunnerOptions) {
 		this.format = options.format;
@@ -67,12 +82,20 @@ export class Runner {
 		this.input = !!options.input;
 		this.output = !!options.output;
 		this.error = !!options.error;
-		this.dual = options.dual || false;
+		if (!options.dual) {
+			this.dualOptions = null;
+		} else if (options.dual === 'debug') {
+			this.dualOptions = { debug: true };
+		} else if (options.dual === true) {
+			this.dualOptions = {};
+		} else {
+			this.dualOptions = { ...options.dual };
+		}
 	}
 
 	async run() {
-		const battleStream = this.dual ?
-			new DualStream(this.input, this.dual === 'debug') :
+		const battleStream = this.dualOptions ?
+			new DualStream(this.input, this.dualOptions) :
 			new RawBattleStream(this.input);
 		const game = this.runGame(this.format, battleStream);
 		if (!this.error) return game;
@@ -171,66 +194,78 @@ class RawBattleStream extends BattleStreams.BattleStream {
 }
 
 class DualStream {
-	private debug: boolean;
+	private readonly debug: boolean;
+	private readonly comparator: DualStreamComparator;
 	private readonly control: RawBattleStream;
-	private test: RawBattleStream;
+	private test: BattleStream;
+	private readonly testInputLog: string[];
 
-	constructor(input: boolean, debug: boolean) {
-		this.debug = debug;
-		// The input to both streams should be the same, so to satisfy the
-		// input flag we only need to track the raw input of one stream.
+	constructor(input: boolean, options: DualStreamOptions = {}) {
+		this.debug = !!options.debug;
+		this.comparator = options.comparator ?? createStateComparator(this.debug);
 		this.control = new RawBattleStream(input);
-		this.test = new RawBattleStream(false);
+		this.test = options.testStreamFactory ? options.testStreamFactory() : new RawBattleStream(false);
+		this.testInputLog = [];
 	}
 
 	get rawInputLog() {
 		const control = this.control.rawInputLog;
-		const test = this.test.rawInputLog;
-		assert.deepEqual(test, control);
+		assert.deepEqual(this.testInputLog, control);
 		return control;
 	}
 
 	async read() {
-		const control = await this.control.read();
-		const test = await this.test.read();
-		// In debug mode, wait to catch this as a difference in the inputLog
-		// and error there so we get the full battle state dumped instead.
-		if (!this.debug) assert.equal(State.normalizeLog(test), State.normalizeLog(control));
-		return control;
+		const controlChunk = await this.control.read();
+		const testChunk = await this.test.read();
+		if (!this.debug) assert.equal(State.normalizeLog(testChunk), State.normalizeLog(controlChunk));
+		return controlChunk;
 	}
 
 	write(message: string) {
 		this.control._write(message);
-		this.test._write(message);
+		void this.test.write(message);
+		this.testInputLog.push(message);
 		this.compare();
 	}
 
 	writeEnd() {
-		// We need to compare first because _writeEnd() destroys the battle object.
 		this.compare(true);
 		this.control._writeEnd();
-		this.test._writeEnd();
+		void this.test.writeEnd();
 	}
 
-	compare(end?: boolean) {
-		if (!this.control.battle || !this.test.battle) return;
+	[Symbol.asyncIterator]() {
+		return this;
+	}
 
-		const control = this.control.battle.toJSON();
-		const test = this.test.battle.toJSON();
+	async next() {
+		const value = await this.read();
+		if (value === null || value === undefined) return { value: undefined, done: true as const };
+		return { value, done: false as const };
+	}
+
+	private compare(end?: boolean) {
+		this.comparator({ control: this.control, test: this.test, end });
+	}
+}
+
+function createStateComparator(debug: boolean): DualStreamComparator {
+	return ({ control, test, end }) => {
+		if (!control.battle || !test.battle) return;
+		const controlState = control.battle.toJSON();
+		const testState = test.battle.toJSON();
 		try {
-			assert.deepEqual(State.normalize(test), State.normalize(control));
+			assert.deepEqual(State.normalize(testState), State.normalize(controlState));
 		} catch (err: any) {
-			if (this.debug) {
-				// NOTE: diffing these directly won't work because the key ordering isn't stable.
-				fs.writeFileSync('logs/control.json', JSON.stringify(control, null, 2));
-				fs.writeFileSync('logs/test.json', JSON.stringify(test, null, 2));
+			if (debug) {
+				fs.writeFileSync('logs/control.json', JSON.stringify(controlState, null, 2));
+				fs.writeFileSync('logs/test.json', JSON.stringify(testState, null, 2));
 			}
 			throw new Error(err.message);
 		}
-
 		if (end) return;
-		const send = this.test.battle.send;
-		this.test.battle = Battle.fromJSON(test);
-		this.test.battle.restart(send);
-	}
+		const send = test.battle.send;
+		test.battle = Battle.fromJSON(testState);
+		test.battle.restart(send);
+	};
 }
